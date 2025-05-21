@@ -3,13 +3,13 @@
 import os from 'node:os'
 import path from 'node:path'
 import chalk from 'chalk'
+import cliProgress from 'cli-progress'
 import extract from 'extract-zip'
 import fs from 'fs-extra'
 import inquirer from 'inquirer'
 
 // Constants
 const DOWNLOADS_FOLDER = path.join(os.homedir(), 'Downloads', 'Personal')
-console.log(DOWNLOADS_FOLDER)
 const NICENANO_VOLUME = '/Volumes/NICENANO'
 const LEFT_FIRMWARE_PATTERN = /sofle_left.*\.uf2$/i
 const RIGHT_FIRMWARE_PATTERN = /sofle_right.*\.uf2$/i
@@ -152,6 +152,26 @@ async function waitForBootloaderMode(side: 'left' | 'right'): Promise<void> {
 }
 
 /**
+ * Run a progress bar animation for a specified duration
+ */
+async function animateProgressBar(
+  progressBar: cliProgress.SingleBar,
+  durationMs: number,
+  status: string,
+  steps = 20,
+): Promise<void> {
+  const stepSize = 100 / steps
+  const stepTimeMs = durationMs / steps
+
+  progressBar.start(100, 0, { status })
+  for (let i = 0; i <= 100; i += stepSize) {
+    progressBar.update(i, { status })
+    await new Promise(resolve => setTimeout(resolve, stepTimeMs))
+  }
+  progressBar.stop()
+}
+
+/**
  * Copy firmware file to the keyboard with retry logic
  */
 async function copyFirmwareToKeyboard(firmwarePath: string, side: 'left' | 'right'): Promise<void> {
@@ -159,13 +179,24 @@ async function copyFirmwareToKeyboard(firmwarePath: string, side: 'left' | 'righ
   const retryDelay = 1000 // 1 second
   let retries = 0
 
+  // Create a new progress bar instance
+  const progressBar = new cliProgress.SingleBar({
+    format: '{bar} {percentage}% | {value}/{total} | {status}',
+    barCompleteChar: '\u2588',
+    barIncompleteChar: '\u2591',
+    hideCursor: true,
+    clearOnComplete: true,
+  })
+
   while (retries < maxRetries) {
     try {
       console.log(chalk.yellow(`Copying ${side} firmware to keyboard...`))
 
       // Make sure the volume is ready before copying
       console.log(chalk.blue('Ensuring the keyboard is ready for writing...'))
-      await new Promise(resolve => setTimeout(resolve, 500))
+
+      // Use progress bar for the first wait time (500ms)
+      await animateProgressBar(progressBar, 500, 'Preparing keyboard for writing...', 10)
 
       // Verify the volume exists and is writable
       await fs.access(NICENANO_VOLUME, fs.constants.W_OK)
@@ -174,9 +205,11 @@ async function copyFirmwareToKeyboard(firmwarePath: string, side: 'left' | 'righ
       await fs.copy(firmwarePath, path.join(NICENANO_VOLUME, path.basename(firmwarePath)))
       console.log(chalk.green(`${side.toUpperCase()} firmware copied successfully!`))
 
-      // Wait for the keyboard to restart
+      // Wait for the keyboard to restart with progress bar (1000ms)
       console.log(chalk.blue('Waiting for keyboard to restart...'))
-      await new Promise(resolve => setTimeout(resolve, 1000)) return
+
+      await animateProgressBar(progressBar, 1000, 'Restarting keyboard...', 20)
+      return
     }
     catch (error: unknown) {
       retries++
@@ -186,7 +219,9 @@ async function copyFirmwareToKeyboard(firmwarePath: string, side: 'left' | 'righ
       }
       else {
         console.warn(chalk.yellow(`Error copying ${side} firmware (attempt ${retries}/${maxRetries}). Retrying in ${retryDelay / 1000} seconds...`))
-        await new Promise(resolve => setTimeout(resolve, retryDelay))
+
+        // Use progress bar for retry delay
+        await animateProgressBar(progressBar, retryDelay, `Retry attempt ${retries}/${maxRetries}...`, 20)
       }
     }
   }
@@ -236,6 +271,26 @@ async function main() {
     await copyFirmwareToKeyboard(rightFirmware, 'right')
 
     console.log(chalk.green.bold('Firmware loading completed successfully!'))
+    
+    // Ask user if they want to delete the zip file
+    const { deleteZip } = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'deleteZip',
+        message: 'Do you want to delete the firmware zip file?',
+        default: false,
+      },
+    ])
+
+    if (deleteZip) {
+      try {
+        fs.unlinkSync(zipFile)
+        console.warn(chalk.green(`Deleted zip file: ${path.basename(zipFile)}`))
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : String(err)
+        console.error(chalk.red(`Error deleting zip file: ${errorMessage}`))
+      }
+    }
   }
   catch (error) {
     console.error('Error:', error)
